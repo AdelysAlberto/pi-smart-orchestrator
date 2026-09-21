@@ -15,6 +15,7 @@ import {
   type PipelineProgressData,
   registerOrchestratorRenderers,
 } from "./tui/decision.renderer.ts";
+import {showOrchestratorSettingsMenu} from "./tui/settings.menu.ts";
 import {VIASERA_PALETTE} from "./tui/theme.ts";
 import {registerCollapsibleToolRenderers} from "./tui/tools.renderer.ts";
 import {runSequentialPipeline} from "./workflow.runner.ts";
@@ -40,6 +41,9 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     const state: OrchestratorCommandState = {
       enabled: config?.enabled === true,
       configValid: loaded.ok,
+      switchModel: config?.switchModel ?? true,
+      switchThinking: config?.switchThinking ?? true,
+      switchAgent: config?.switchAgent ?? true,
     };
 
     const logger: OrchestratorLogger = createOrchestratorLogger({
@@ -127,6 +131,37 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
       }
       return undefined;
     });
+
+    // Support context_with_system event in new Pi runtime for verbatim prompt injection
+    (pi as unknown as {on(event: string, handler: (event: {messages: readonly unknown[]}) => unknown): void}).on(
+      "context_with_system",
+      async (event: {messages: readonly unknown[]}) => {
+        if (pendingSpecialistPrompt && event.messages.length > 0) {
+          const promptToInject = pendingSpecialistPrompt;
+          pendingSpecialistPrompt = undefined;
+
+          const updatedMessages = [...event.messages] as Array<{role?: string; content?: unknown}>;
+          const lead = updatedMessages[0];
+          if (lead && lead.role === "system") {
+            const leadContent = Array.isArray(lead.content)
+              ? lead.content
+              : [{type: "text", text: String(lead.content ?? "")}];
+
+            const textPart = leadContent.find((p: {type?: string; text?: string}) => p?.type === "text") as
+              | {type: string; text: string}
+              | undefined;
+            if (textPart && typeof textPart.text === "string") {
+              textPart.text = `${textPart.text}\n\n${promptToInject}`;
+            } else {
+              leadContent.push({type: "text", text: promptToInject});
+            }
+            updatedMessages[0] = {...lead, content: leadContent};
+            return {messages: updatedMessages};
+          }
+        }
+        return undefined;
+      }
+    );
 
     interface EntriesProvider {
       getEntries(): readonly unknown[];
@@ -242,24 +277,30 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
         latencyMs: outcome.latencyMs,
         mode: outcome.decision.mode,
         workflowName: outcome.decision.workflowName,
+        switchModel: state.switchModel,
+        switchThinking: state.switchThinking,
+        switchAgent: state.switchAgent,
       });
 
       const currentRunner = runner;
 
       if (outcome.decision.mode === "fastPath") {
-        if (agent) {
+        if (state.switchAgent && agent) {
           pendingSpecialistPrompt = agent.systemPrompt;
           if (agent.tools.length > 0) {
             pi.setActiveTools(agent.tools);
           }
         }
 
-        const resolveModel = createGenericModelResolver(modelRegistry ?? ctx.modelRegistry);
-        const targetModel = resolveModel(outcome.decision.model);
-        if (targetModel) {
-          await pi.setModel(targetModel);
+        if (state.switchModel) {
+          const resolveModel = createGenericModelResolver(modelRegistry ?? ctx.modelRegistry);
+          const targetModel = resolveModel(outcome.decision.model);
+          if (targetModel) {
+            await pi.setModel(targetModel);
+          }
         }
-        if (outcome.decision.thinking) {
+
+        if (state.switchThinking && outcome.decision.thinking) {
           pi.setThinkingLevel(outcome.decision.thinking as import("@earendil-works/pi-agent-core").ThinkingLevel);
         }
 
@@ -311,14 +352,34 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     });
 
     pi.registerCommand("orchestrator", {
-      description: "Activar, desactivar o inspeccionar Pi Smart Orchestrator (/orchestrator on|off)",
+      description: "Configurar o alternar Pi Smart Orchestrator (/orchestrator [settings|on|off|model|thinking|agent])",
       handler: async (args, ctx) => {
+        const trimmed = args.trim();
+        if (!trimmed || trimmed === "settings" || trimmed === "config" || trimmed === "menu") {
+          await showOrchestratorSettingsMenu(ctx, state, configPath);
+          const activeStatus = state.enabled && state.configValid;
+          ctx.ui.setStatus(STATUS_KEY, activeStatus ? "orchestrator: active" : "orchestrator: off");
+          return;
+        }
+
         const outcome = resolveOrchestratorCommand(args, state);
         state.enabled = outcome.enabled && state.configValid;
+        state.switchModel = outcome.switchModel;
+        state.switchThinking = outcome.switchThinking;
+        state.switchAgent = outcome.switchAgent;
         if (outcome.changed) {
           ctx.ui.setStatus(STATUS_KEY, outcome.status);
         }
         ctx.ui.notify(outcome.message, outcome.tone);
+      },
+    });
+
+    pi.registerCommand("orchestrator-settings", {
+      description: "Abrir menú interactivo de configuración de Pi Smart Orchestrator",
+      handler: async (_args, ctx) => {
+        await showOrchestratorSettingsMenu(ctx, state, configPath);
+        const activeStatus = state.enabled && state.configValid;
+        ctx.ui.setStatus(STATUS_KEY, activeStatus ? "orchestrator: active" : "orchestrator: off");
       },
     });
 
@@ -445,14 +506,6 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     pi.registerCommand("copy-input", {
       description: "Copiar el texto actual del editor de entrada al portapapeles",
       handler: copyInputHandler,
-    });
-
-    pi.registerCommand("reload", {
-      description: "Recargar runtime, extensiones y configuración de Pi (/reload)",
-      handler: async (_args, ctx) => {
-        ctx.ui.notify("Recargando runtime y extensiones de Pi...", "info");
-        await ctx.reload();
-      },
     });
   };
 }

@@ -83,6 +83,9 @@ describe("Config Validator", () => {
     if (!res.ok) return;
 
     expect(res.value.enabled).toBe(true);
+    expect(res.value.switchModel).toBe(true);
+    expect(res.value.switchThinking).toBe(true);
+    expect(res.value.switchAgent).toBe(true);
     expect(res.value.routes.code?.handle).toBe("homero");
     expect(res.value.theme.colors.active).toBe("#00E5FF");
     expect(res.value.workflows["plan-and-build"]?.steps.length).toBe(2);

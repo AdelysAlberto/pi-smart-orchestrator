@@ -6,6 +6,9 @@ import {runParallelSwarm, runSequentialPipeline} from "../workflow.runner.ts";
 describe("Workflow Runner", () => {
   const dummyConfig: OrchestratorConfig = {
     enabled: true,
+    switchModel: true,
+    switchThinking: true,
+    switchAgent: true,
     endpoint: "http://127.0.0.1:8090/analyze",
     timeoutMs: 200,
     checkpoint: "",

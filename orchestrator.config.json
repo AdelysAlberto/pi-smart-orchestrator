@@ -1,5 +1,8 @@
 {
   "enabled": true,
+  "switchModel": false,
+  "switchThinking": false,
+  "switchAgent": true,
   "classifierConfig": "./laya.config.json",
   "agentsDir": "/Volumes/Datos/Projects/utils/agents/agents-pi/agents",
   "logFile": "~/.pi/agent/smart-orchestrator.log",

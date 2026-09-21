@@ -20,6 +20,9 @@ export interface OrchestratorTaskCardData {
   latencyMs?: number;
   mode?: "fastPath" | "workflow" | "swarm";
   workflowName?: string;
+  switchModel?: boolean;
+  switchThinking?: boolean;
+  switchAgent?: boolean;
 }
 
 export interface PipelineProgressData {
@@ -101,9 +104,10 @@ export function registerOrchestratorRenderers(pi: ExtensionAPI, paletteSource?: 
 
     // Dispatch
     const dispatchLabel = theme.fg("dim", "  Despacho:     ");
-    const agentVal = colorize(`@${data.handle}`, palette.active, true);
+    const agentText = `@${data.handle}${data.switchAgent === false ? " (omitido)" : ""}`;
+    const agentVal = colorize(agentText, data.switchAgent === false ? palette.surface : palette.active, true);
     const arrow = theme.fg("dim", " ──► ");
-    const modelStr = `${data.model}${data.thinking ? `:${data.thinking}` : ""}`;
+    const modelStr = `${data.switchModel === false ? "(modelo actual)" : data.model}${data.thinking && data.switchThinking !== false ? `:${data.thinking}` : ""}`;
     const modelVal = theme.fg("dim", modelStr);
 
     let modeSuffix = "";

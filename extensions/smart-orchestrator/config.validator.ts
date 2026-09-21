@@ -1,4 +1,4 @@
-import {existsSync, readFileSync} from "node:fs";
+import {existsSync, readFileSync, writeFileSync} from "node:fs";
 import {dirname, resolve} from "node:path";
 import {fail, isRecord, type Result, readBoolean, readNumber, readString} from "./guards.ts";
 import type {LayaClientConfig, LayaQuestion} from "./laya.client.ts";
@@ -42,6 +42,9 @@ export interface EffortModelConfig {
 
 export interface OrchestratorConfig extends LayaClientConfig {
   enabled: boolean;
+  switchModel: boolean;
+  switchThinking: boolean;
+  switchAgent: boolean;
   classifierConfig?: string;
   endpoint: string;
   timeoutMs: number;
@@ -118,6 +121,9 @@ export function parseOrchestratorConfig(raw: unknown): Result<OrchestratorConfig
   if (!isRecord(raw)) return fail("config_not_object");
 
   const enabled = readBoolean(raw, "enabled") ?? true;
+  const switchModel = readBoolean(raw, "switchModel") ?? true;
+  const switchThinking = readBoolean(raw, "switchThinking") ?? true;
+  const switchAgent = readBoolean(raw, "switchAgent") ?? true;
   const classifierConfig = readString(raw, "classifierConfig");
   const endpoint = readString(raw, "endpoint") ?? "http://127.0.0.1:8090/analyze";
   const timeoutMs = readNumber(raw, "timeoutMs") ?? 1500;
@@ -224,6 +230,9 @@ export function parseOrchestratorConfig(raw: unknown): Result<OrchestratorConfig
     ok: true,
     value: {
       enabled,
+      switchModel,
+      switchThinking,
+      switchAgent,
       classifierConfig,
       endpoint,
       timeoutMs,
@@ -277,5 +286,27 @@ export function loadOrchestratorConfigFile(filePath: string): Result<Orchestrato
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return fail(`cannot_load_config:${message}`);
+  }
+}
+
+export function saveOrchestratorConfigFile(
+  filePath: string,
+  updates: Partial<Pick<OrchestratorConfig, "enabled" | "switchModel" | "switchThinking" | "switchAgent">>
+): Result<void> {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(content);
+    if (!isRecord(parsed)) return fail("config_not_object");
+
+    if (updates.enabled !== undefined) parsed.enabled = updates.enabled;
+    if (updates.switchModel !== undefined) parsed.switchModel = updates.switchModel;
+    if (updates.switchThinking !== undefined) parsed.switchThinking = updates.switchThinking;
+    if (updates.switchAgent !== undefined) parsed.switchAgent = updates.switchAgent;
+
+    writeFileSync(filePath, `${JSON.stringify(parsed, null, 2)}\n`, "utf-8");
+    return {ok: true, value: undefined};
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return fail(`cannot_save_config:${message}`);
   }
 }

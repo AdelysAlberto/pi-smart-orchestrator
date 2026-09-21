@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# OS & IDE artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local Memory & Logs
+.cogni/
+*.log
+*.tmp
+*.local
+
+# Environment & Credentials
+.env
+.env.*
+!.env.example

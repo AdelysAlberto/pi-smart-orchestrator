@@ -1,0 +1,102 @@
+{
+  "enabled": true,
+  "classifierConfig": "./laya.config.json",
+  "agentsDir": "/Volumes/Datos/Projects/utils/agents/agents-pi/agents",
+  "logFile": "~/.pi/agent/smart-orchestrator.log",
+  "maxInFlight": 3,
+  "debug": false,
+  "theme": {
+    "colors": {
+      "active": "#00E5FF",
+      "header": "#A3BF06",
+      "action": "#FF6B00",
+      "surface": "#0B0F17"
+    }
+  },
+  "routes": {
+    "code": {
+      "handle": "homero",
+      "fastPath": true
+    },
+    "architecture": {
+      "handle": "sheldon",
+      "fastPath": false,
+      "workflow": "plan-and-build"
+    },
+    "ux": {
+      "handle": "edna",
+      "fastPath": true
+    },
+    "review": {
+      "handle": "tio-bob",
+      "fastPath": true
+    },
+    "security": {
+      "handle": "gorgory",
+      "fastPath": true
+    },
+    "legal": {
+      "handle": "saul",
+      "fastPath": true
+    },
+    "finance": {
+      "handle": "contador",
+      "fastPath": true
+    },
+    "general": {
+      "handle": "none"
+    },
+    "default": {
+      "handle": "homero"
+    }
+  },
+  "workflows": {
+    "plan-and-build": {
+      "description": "Workflow de dos etapas: Diseño de arquitectura formal seguido de construcción de código limpio",
+      "steps": [
+        {
+          "step": 1,
+          "name": "Diseño de Arquitectura",
+          "agent": "sheldon",
+          "effort": "high",
+          "output": "artifacts/architecture.md",
+          "requireApproval": true
+        },
+        {
+          "step": 2,
+          "name": "Construcción de Código",
+          "agent": "homero",
+          "effort": "low",
+          "inputFrom": "artifacts/architecture.md"
+        }
+      ]
+    },
+    "security-audit": {
+      "description": "Auditoría de seguridad y revisión de código en paralelo",
+      "steps": [
+        {
+          "step": 1,
+          "name": "Auditoría de Vulnerabilidades",
+          "agent": "gorgory",
+          "effort": "high"
+        },
+        {
+          "step": 2,
+          "name": "Revisión de Estándares",
+          "agent": "tio-bob",
+          "effort": "low"
+        }
+      ]
+    }
+  },
+  "effortModels": {
+    "low": {
+      "model": "deepseek-ryg/deepseek-flash",
+      "thinking": "low"
+    },
+    "high": {
+      "model": "deepseek-ryg/deepseek-v4-pro",
+      "thinking": "high"
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "pi-smart-orchestrator",
+  "version": "0.1.0",
+  "description": "Orquestador visual y determinista para Pi impulsado por Laya y estetica Viasera",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/smart-orchestrator/index.ts"
+    ]
+  },
+  "files": [
+    "extensions",
+    "orchestrator.config.json",
+    "README.md"
+  ],
+  "scripts": {
+    "biome:check": "biome check .",
+    "biome:format": "biome check --write .",
+    "check": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.11",
+    "@earendil-works/pi-coding-agent": "0.86.1",
+    "@types/bun": "1.4.2",
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
+  }
+}

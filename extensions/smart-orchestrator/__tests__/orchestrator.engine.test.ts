@@ -143,4 +143,89 @@ describe("Orchestrator Engine", () => {
     if (!outcome.ok) return;
     expect(outcome.decision.handle).toBe("sheldon");
   });
+
+  test("routes explicit @homero tag directly bypassing classifier with 0ms latency", async () => {
+    let classifierCalled = false;
+    const mockCatalog = {
+      getAgent: (handle: string) => {
+        if (handle === "homero") {
+          return {
+            ok: true as const,
+            value: {
+              name: "homero",
+              description: "Senior Code Worker",
+              tools: ["read", "write", "edit", "bash"],
+              systemPrompt: "You are Homer",
+              filePath: "/path/to/homero.md",
+            },
+          };
+        }
+        return {ok: false as const, reason: "not_found"};
+      },
+      listAgents: () => [],
+      reload: () => {},
+    };
+
+    const outcome = await processInput(
+      {text: "@homero por favor refactoriza este módulo"},
+      {
+        config: dummyConfig,
+        classify: async () => {
+          classifierCalled = true;
+          return {ok: true, value: {answers: {domain: "general", effort: "low"}, meta: {}}};
+        },
+        runner: mockRunner,
+        isEnabled: () => true,
+        catalog: mockCatalog,
+      }
+    );
+
+    expect(classifierCalled).toBe(false);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.decision.handle).toBe("homero");
+    expect(outcome.decision.domain).toBe("code");
+    expect(outcome.decision.mode).toBe("fastPath");
+    expect(outcome.latencyMs).toBe(0);
+  });
+
+  test("routes explicit /agent:sheldon command directly", async () => {
+    const mockCatalog = {
+      getAgent: (handle: string) => {
+        if (handle === "sheldon") {
+          return {
+            ok: true as const,
+            value: {
+              name: "sheldon",
+              description: "Architect",
+              tools: ["read"],
+              thinking: "high",
+              systemPrompt: "You are Sheldon",
+              filePath: "/path/to/sheldon.md",
+            },
+          };
+        }
+        return {ok: false as const, reason: "not_found"};
+      },
+      listAgents: () => [],
+      reload: () => {},
+    };
+
+    const outcome = await processInput(
+      {text: "/agent:sheldon Diseña el sistema de eventos"},
+      {
+        config: dummyConfig,
+        classify: async () => ({ok: true, value: {answers: {domain: "general", effort: "low"}, meta: {}}}),
+        runner: mockRunner,
+        isEnabled: () => true,
+        catalog: mockCatalog,
+      }
+    );
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.decision.handle).toBe("sheldon");
+    expect(outcome.decision.effort).toBe("high");
+    expect(outcome.latencyMs).toBe(0);
+  });
 });

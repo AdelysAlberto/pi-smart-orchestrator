@@ -2,6 +2,7 @@ import {copyToClipboard, type ExtensionAPI} from "@earendil-works/pi-coding-agen
 import {type AgentsCatalog, createAgentsCatalog} from "./agents.catalog.ts";
 import {type OrchestratorCommandState, resolveOrchestratorCommand, STATUS_KEY} from "./command.ts";
 import {loadOrchestratorConfigFile, type OrchestratorConfig} from "./config.validator.ts";
+import {extractAndNormalizeImagesFromText} from "./image.processor.ts";
 import {type Classifier, createLayaClassifier} from "./laya.client.ts";
 import {createOrchestratorLogger, type OrchestratorLogger} from "./logger.ts";
 import {createGenericModelResolver, createNativeAgentRunner, type NativeAgentRunner} from "./native.agent.runner.ts";
@@ -15,6 +16,7 @@ import {
   registerOrchestratorRenderers,
 } from "./tui/decision.renderer.ts";
 import {VIASERA_PALETTE} from "./tui/theme.ts";
+import {registerCollapsibleToolRenderers} from "./tui/tools.renderer.ts";
 import {runSequentialPipeline} from "./workflow.runner.ts";
 
 export interface SmartOrchestratorOptions {
@@ -31,6 +33,7 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     const config: OrchestratorConfig | undefined = loaded.ok ? loaded.value : undefined;
 
     registerOrchestratorRenderers(pi, () => config?.theme?.colors ?? VIASERA_PALETTE);
+    registerCollapsibleToolRenderers(pi);
 
     const classifier = options.classifier ?? (config ? createLayaClassifier(config) : undefined);
 
@@ -181,19 +184,33 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
         return {action: "continue"};
       }
 
+      // Extract and normalize any pasted image paths (e.g. TIFF / HEIC / PNG / JPG)
+      const imageResult = await extractAndNormalizeImagesFromText(event.text);
+      const effectiveText = imageResult.cleanedText;
+      const combinedImages =
+        imageResult.images.length > 0 ? [...(event.images ?? []), ...imageResult.images] : event.images;
+
       const contextPrompt = extractPreviousUserPrompt(ctx.sessionManager);
       const outcome = await processInput(
-        {text: event.text, contextPrompt},
+        {text: effectiveText, contextPrompt},
         {
           config,
           classify: classifier,
           runner,
           isEnabled: () => state.enabled,
+          catalog,
         }
       );
 
       if (!outcome.ok) {
         await logger.log({event: "input_fail_open", reason: outcome.reason});
+        if (imageResult.images.length > 0) {
+          return {
+            action: "transform",
+            text: effectiveText,
+            images: combinedImages,
+          };
+        }
         return {action: "continue"};
       }
 
@@ -212,9 +229,9 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
       const agentRes = catalog.getAgent(outcome.decision.handle);
       const agent = agentRes.ok ? agentRes.value : undefined;
 
-      // Guarantee that user prompt is ALWAYS rendered along with routing details, specialist scope and armed tools
+      // Render routing details, specialist scope and armed tools
       pi.appendEntry<OrchestratorTaskCardData>(ORCHESTRATOR_TASK_ENTRY_TYPE, {
-        userPrompt: event.text,
+        userPrompt: effectiveText,
         domain: outcome.decision.domain,
         effort: outcome.decision.effort,
         handle: outcome.decision.handle,
@@ -246,6 +263,14 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
           pi.setThinkingLevel(outcome.decision.thinking as import("@earendil-works/pi-agent-core").ThinkingLevel);
         }
 
+        if (imageResult.images.length > 0) {
+          return {
+            action: "transform",
+            text: effectiveText,
+            images: combinedImages,
+          };
+        }
+
         return {action: "continue"};
       }
 
@@ -255,7 +280,7 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
           runSequentialPipeline({
             workflowName: outcome.decision.workflowName,
             workflow,
-            userPrompt: event.text,
+            userPrompt: effectiveText,
             config,
             runner: currentRunner,
             onProgress: progress => {
@@ -297,6 +322,112 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
       },
     });
 
+    // Helper to insert agent tag into main terminal editor
+    const activateAgentInEditor = (
+      agentName: string,
+      ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext
+    ) => {
+      const currentText = ctx.ui.getEditorText().trim();
+      if (currentText.length > 0 && !currentText.includes(`@${agentName}`)) {
+        ctx.ui.setEditorText(`@${agentName} ${currentText}`);
+      } else if (!currentText.includes(`@${agentName}`)) {
+        ctx.ui.setEditorText(`@${agentName} `);
+      }
+      ctx.ui.notify(`Especialista @${agentName} activado. Escribe en el editor principal con salto de línea.`, "info");
+    };
+
+    // /agents command - Interactive catalog selector & details
+    pi.registerCommand("agents", {
+      description: "Listar e interactuar con los especialistas disponibles (/agents)",
+      handler: async (_args, ctx) => {
+        const agents = catalog.listAgents();
+        if (agents.length === 0) {
+          ctx.ui.notify("No se encontraron agentes especialistas configurados.", "warning");
+          return;
+        }
+
+        const options = agents.map(
+          a => `${a.name.padEnd(10, " ")} │ ${a.description.slice(0, 70)}${a.description.length > 70 ? "…" : ""}`
+        );
+
+        const choice = await ctx.ui.select("Especialistas Disponibles:", options);
+        if (!choice) return;
+
+        const selectedIndex = options.indexOf(choice);
+        const selectedAgent = agents[selectedIndex];
+        if (!selectedAgent) return;
+
+        activateAgentInEditor(selectedAgent.name, ctx);
+      },
+    });
+
+    // /agent command - Invocation with argument completions
+    pi.registerCommand("agent", {
+      description: "Invocar un agente especialista específico (/agent <nombre> <prompt>)",
+      getArgumentCompletions: (prefix: string) => {
+        const agents = catalog.listAgents();
+        const clean = prefix.trim().toLowerCase();
+        return agents
+          .filter(a => a.name.toLowerCase().startsWith(clean))
+          .map(a => ({
+            value: a.name,
+            label: a.name,
+            description: a.description,
+          }));
+      },
+      handler: async (args, ctx) => {
+        const parts = args.trim().split(/\s+/);
+        const agentName = parts[0]?.toLowerCase();
+        const restPrompt = parts.slice(1).join(" ").trim();
+
+        if (!agentName) {
+          ctx.ui.notify("Uso: /agent <nombre> <prompt> (ej: /agent homero construye el auth)", "warning");
+          return;
+        }
+
+        const agentRes = catalog.getAgent(agentName);
+        if (!agentRes.ok) {
+          ctx.ui.notify(`Agente no encontrado: "${agentName}". Usa /agents para ver los disponibles.`, "error");
+          return;
+        }
+
+        if (restPrompt.length > 0) {
+          pi.sendUserMessage(`@${agentRes.value.name} ${restPrompt}`);
+        } else {
+          activateAgentInEditor(agentRes.value.name, ctx);
+        }
+      },
+    });
+
+    // Register each specialist agent individually (matching /skill:* format)
+    for (const agent of catalog.listAgents()) {
+      // 1. /agent:<name> (e.g. /agent:homero, /agent:sheldon, etc.)
+      pi.registerCommand(`agent:${agent.name}`, {
+        description: `[Agente] ${agent.description}`,
+        handler: async (args, ctx) => {
+          const prompt = args.trim();
+          if (prompt.length > 0) {
+            pi.sendUserMessage(`@${agent.name} ${prompt}`);
+          } else {
+            activateAgentInEditor(agent.name, ctx);
+          }
+        },
+      });
+
+      // 2. Direct shortcut /<name> (e.g. /homero, /sheldon, etc.)
+      pi.registerCommand(agent.name, {
+        description: `[Agente @${agent.name}] ${agent.description}`,
+        handler: async (args, ctx) => {
+          const prompt = args.trim();
+          if (prompt.length > 0) {
+            pi.sendUserMessage(`@${agent.name} ${prompt}`);
+          } else {
+            activateAgentInEditor(agent.name, ctx);
+          }
+        },
+      });
+    }
+
     // Input Clipboard Utilities
     const copyInputHandler = async (
       _args: string,
@@ -314,6 +445,14 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     pi.registerCommand("copy-input", {
       description: "Copiar el texto actual del editor de entrada al portapapeles",
       handler: copyInputHandler,
+    });
+
+    pi.registerCommand("reload", {
+      description: "Recargar runtime, extensiones y configuración de Pi (/reload)",
+      handler: async (_args, ctx) => {
+        ctx.ui.notify("Recargando runtime y extensiones de Pi...", "info");
+        await ctx.reload();
+      },
     });
   };
 }

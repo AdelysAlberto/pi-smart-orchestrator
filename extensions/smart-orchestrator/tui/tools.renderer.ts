@@ -51,6 +51,13 @@ function getBuiltInTools(cwd: string) {
   return tools;
 }
 
+function extractResultText(result: unknown): string | undefined {
+  const content = (result as {content?: readonly {type?: string; text?: string}[]})?.content;
+  if (!Array.isArray(content)) return undefined;
+  const textItem = content.find(c => c?.type === "text");
+  return typeof textItem?.text === "string" ? textItem.text : undefined;
+}
+
 export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
   // Read Tool
   pi.registerTool({
@@ -59,7 +66,8 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
     description: "Read the contents of a file.",
     parameters: getBuiltInTools(process.cwd()).read.parameters,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).read.execute(toolCallId, params, signal, onUpdate);
+      const effectiveCwd = ctx?.cwd ?? process.cwd();
+      return getBuiltInTools(effectiveCwd).read.execute(toolCallId, params, signal, onUpdate);
     },
     renderCall(args, theme) {
       const path = shortenPath(args.path || "");
@@ -71,18 +79,18 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
       }
       return new Text(`${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}`, 0, 0);
     },
-    renderResult(result, {expanded}, theme) {
-      const textContent = result.content.find(c => c.type === "text");
-      const text = textContent?.text ?? "";
+    renderResult(result, {expanded, isPartial}, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "⏳ leyendo..."), 0, 0);
+      const text = extractResultText(result) ?? "";
       if (!expanded) {
         if (!text) return new Text("", 0, 0);
-        if ((result as {isError?: boolean}).isError || text.startsWith("Error:") || text.startsWith("error:")) {
+        if ((result as {isError?: boolean})?.isError || text.startsWith("Error:") || text.startsWith("error:")) {
           return new Text(theme.fg("error", ` -> ✕ ${text.slice(0, 60)}`), 0, 0);
         }
         const lineCount = text.split("\n").length;
         return new Text(theme.fg("muted", ` -> ${lineCount} líneas`), 0, 0);
       }
-      if (textContent?.type !== "text") return new Text("", 0, 0);
+      if (!text) return new Text("", 0, 0);
       const output = text
         .split("\n")
         .map(line => theme.fg("toolOutput", line))
@@ -98,12 +106,13 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
     description: "Execute a bash command in the current working directory.",
     parameters: getBuiltInTools(process.cwd()).bash.parameters,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const effectiveCwd = ctx?.cwd ?? process.cwd();
       const rawParams = params as {timeout?: number};
       const boundParams = {
         ...params,
         timeout: rawParams.timeout ?? 90,
       };
-      return getBuiltInTools(ctx.cwd).bash.execute(toolCallId, boundParams, signal, onUpdate);
+      return getBuiltInTools(effectiveCwd).bash.execute(toolCallId, boundParams, signal, onUpdate);
     },
     renderCall(args, theme) {
       const command = args.command || "...";
@@ -111,11 +120,11 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
       const timeoutSuffix = timeout ? theme.fg("muted", ` (${timeout}s)`) : "";
       return new Text(theme.fg("toolTitle", theme.bold(`$ ${command}`)) + timeoutSuffix, 0, 0);
     },
-    renderResult(result, {expanded}, theme) {
-      const textContent = result.content.find(c => c.type === "text");
-      const text = textContent?.text?.trim() ?? "";
+    renderResult(result, {expanded, isPartial}, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "⏳ ejecutando..."), 0, 0);
+      const text = extractResultText(result)?.trim() ?? "";
       const isError =
-        Boolean((result as {isError?: boolean}).isError) || text.startsWith("Error:") || text.startsWith("error:");
+        Boolean((result as {isError?: boolean})?.isError) || text.startsWith("Error:") || text.startsWith("error:");
 
       if (!expanded) {
         if (!text) return new Text("", 0, 0);
@@ -128,7 +137,7 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
         return new Text(theme.fg("muted", ` -> ✓ ${countText}`), 0, 0);
       }
 
-      if (textContent?.type !== "text") return new Text("", 0, 0);
+      if (!text) return new Text("", 0, 0);
       const colorKey = isError ? "error" : "toolOutput";
       const output = text
         .split("\n")
@@ -145,7 +154,8 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
     description: "Write content to a file.",
     parameters: getBuiltInTools(process.cwd()).write.parameters,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).write.execute(toolCallId, params, signal, onUpdate);
+      const effectiveCwd = ctx?.cwd ?? process.cwd();
+      return getBuiltInTools(effectiveCwd).write.execute(toolCallId, params, signal, onUpdate);
     },
     renderCall(args, theme) {
       const path = shortenPath(args.path || "");
@@ -154,17 +164,17 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
       const lineInfo = lineCount > 0 ? theme.fg("muted", ` (${lineCount} lines)`) : "";
       return new Text(`${theme.fg("toolTitle", theme.bold("write"))} ${pathDisplay}${lineInfo}`, 0, 0);
     },
-    renderResult(result, {expanded}, theme) {
-      const textContent = result.content.find(c => c.type === "text");
-      const text = textContent?.text ?? "";
+    renderResult(result, {expanded, isPartial}, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "⏳ escribiendo..."), 0, 0);
+      const text = extractResultText(result) ?? "";
       if (!expanded) {
-        if ((result as {isError?: boolean}).isError || text.startsWith("Error:") || text.startsWith("error:")) {
+        if ((result as {isError?: boolean})?.isError || text.startsWith("Error:") || text.startsWith("error:")) {
           return new Text(theme.fg("error", ` -> ✕ ${text.slice(0, 60)}`), 0, 0);
         }
         return new Text(theme.fg("muted", " -> ✓ guardado"), 0, 0);
       }
-      if (textContent?.type === "text" && textContent.text) {
-        return new Text(`\n${theme.fg("error", textContent.text)}`, 0, 0);
+      if (text) {
+        return new Text(`\n${theme.fg("error", text)}`, 0, 0);
       }
       return new Text("", 0, 0);
     },
@@ -177,18 +187,19 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
     description: "Edit a file by replacing exact text.",
     parameters: getBuiltInTools(process.cwd()).edit.parameters,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).edit.execute(toolCallId, params, signal, onUpdate);
+      const effectiveCwd = ctx?.cwd ?? process.cwd();
+      return getBuiltInTools(effectiveCwd).edit.execute(toolCallId, params, signal, onUpdate);
     },
     renderCall(args, theme) {
       const path = shortenPath(args.path || "");
       const pathDisplay = path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
       return new Text(`${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`, 0, 0);
     },
-    renderResult(result, {expanded}, theme) {
-      const textContent = result.content.find(c => c.type === "text");
-      const text = textContent?.text ?? "";
+    renderResult(result, {expanded, isPartial}, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "⏳ editando..."), 0, 0);
+      const text = extractResultText(result) ?? "";
       const isError =
-        Boolean((result as {isError?: boolean}).isError) || text.includes("Error") || text.includes("error");
+        Boolean((result as {isError?: boolean})?.isError) || text.includes("Error") || text.includes("error");
 
       if (!expanded) {
         if (isError) {
@@ -196,7 +207,7 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
         }
         return new Text(theme.fg("muted", " -> ✓ aplicado"), 0, 0);
       }
-      if (textContent?.type !== "text") return new Text("", 0, 0);
+      if (!text) return new Text("", 0, 0);
       const colorKey = isError ? "error" : "toolOutput";
       return new Text(`\n${theme.fg(colorKey, text)}`, 0, 0);
     },
@@ -209,7 +220,8 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
     description: "Find files by name pattern.",
     parameters: getBuiltInTools(process.cwd()).find.parameters,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).find.execute(toolCallId, params, signal, onUpdate);
+      const effectiveCwd = ctx?.cwd ?? process.cwd();
+      return getBuiltInTools(effectiveCwd).find.execute(toolCallId, params, signal, onUpdate);
     },
     renderCall(args, theme) {
       const pattern = args.pattern || "";
@@ -220,17 +232,18 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
         0
       );
     },
-    renderResult(result, {expanded}, theme) {
-      const textContent = result.content.find(c => c.type === "text");
+    renderResult(result, {expanded, isPartial}, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "⏳ buscando..."), 0, 0);
+      const text = extractResultText(result);
       if (!expanded) {
-        if (textContent?.type === "text") {
-          const count = textContent.text.trim().split("\n").filter(Boolean).length;
+        if (text) {
+          const count = text.trim().split("\n").filter(Boolean).length;
           if (count > 0) return new Text(theme.fg("muted", ` -> ${count} archivos`), 0, 0);
         }
         return new Text("", 0, 0);
       }
-      if (textContent?.type !== "text") return new Text("", 0, 0);
-      const output = textContent.text
+      if (!text) return new Text("", 0, 0);
+      const output = text
         .trim()
         .split("\n")
         .map(l => theme.fg("toolOutput", l))
@@ -246,7 +259,8 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
     description: "Search file contents by regex pattern.",
     parameters: getBuiltInTools(process.cwd()).grep.parameters,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).grep.execute(toolCallId, params, signal, onUpdate);
+      const effectiveCwd = ctx?.cwd ?? process.cwd();
+      return getBuiltInTools(effectiveCwd).grep.execute(toolCallId, params, signal, onUpdate);
     },
     renderCall(args, theme) {
       const pattern = args.pattern || "";
@@ -257,17 +271,18 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
         0
       );
     },
-    renderResult(result, {expanded}, theme) {
-      const textContent = result.content.find(c => c.type === "text");
+    renderResult(result, {expanded, isPartial}, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "⏳ buscando..."), 0, 0);
+      const text = extractResultText(result);
       if (!expanded) {
-        if (textContent?.type === "text") {
-          const count = textContent.text.trim().split("\n").filter(Boolean).length;
+        if (text) {
+          const count = text.trim().split("\n").filter(Boolean).length;
           if (count > 0) return new Text(theme.fg("muted", ` -> ${count} coincidencias`), 0, 0);
         }
         return new Text("", 0, 0);
       }
-      if (textContent?.type !== "text") return new Text("", 0, 0);
-      const output = textContent.text
+      if (!text) return new Text("", 0, 0);
+      const output = text
         .trim()
         .split("\n")
         .map(l => theme.fg("toolOutput", l))
@@ -283,23 +298,25 @@ export function registerCollapsibleToolRenderers(pi: ExtensionAPI): void {
     description: "List directory contents with file sizes.",
     parameters: getBuiltInTools(process.cwd()).ls.parameters,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).ls.execute(toolCallId, params, signal, onUpdate);
+      const effectiveCwd = ctx?.cwd ?? process.cwd();
+      return getBuiltInTools(effectiveCwd).ls.execute(toolCallId, params, signal, onUpdate);
     },
     renderCall(args, theme) {
       const path = shortenPath(args.path || ".");
       return new Text(`${theme.fg("toolTitle", theme.bold("ls"))} ${theme.fg("accent", path)}`, 0, 0);
     },
-    renderResult(result, {expanded}, theme) {
-      const textContent = result.content.find(c => c.type === "text");
+    renderResult(result, {expanded, isPartial}, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "⏳ listando..."), 0, 0);
+      const text = extractResultText(result);
       if (!expanded) {
-        if (textContent?.type === "text") {
-          const count = textContent.text.trim().split("\n").filter(Boolean).length;
+        if (text) {
+          const count = text.trim().split("\n").filter(Boolean).length;
           if (count > 0) return new Text(theme.fg("muted", ` -> ${count} entradas`), 0, 0);
         }
         return new Text("", 0, 0);
       }
-      if (textContent?.type !== "text") return new Text("", 0, 0);
-      const output = textContent.text
+      if (!text) return new Text("", 0, 0);
+      const output = text
         .trim()
         .split("\n")
         .map(l => theme.fg("toolOutput", l))

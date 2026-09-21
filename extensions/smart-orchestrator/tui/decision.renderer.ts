@@ -44,26 +44,6 @@ export interface ParallelSwarmData {
   inFlight: SwarmAgentStatus[];
 }
 
-function formatPromptEllipsis(text: string, maxLineLength = 70, _maxLines = 2): string[] {
-  const clean = text
-    .replace(/^["'`_]+|["'`_]+$/g, "")
-    .trim()
-    .replace(/\s+/g, " ");
-  if (!clean) return ['""'];
-
-  if (clean.length <= maxLineLength) {
-    return [`"${clean}"`];
-  }
-
-  const line1 = clean.slice(0, maxLineLength);
-  const remaining = clean.slice(maxLineLength);
-  if (remaining.length <= maxLineLength) {
-    return [`"${line1}`, `${remaining}"`];
-  }
-  const line2 = `${remaining.slice(0, maxLineLength - 1)}…`;
-  return [`"${line1}`, `${line2}"`];
-}
-
 export type PaletteSource = ThemeColors | (() => ThemeColors);
 
 export function registerOrchestratorRenderers(pi: ExtensionAPI, paletteSource?: PaletteSource): void {
@@ -86,20 +66,14 @@ export function registerOrchestratorRenderers(pi: ExtensionAPI, paletteSource?: 
     const divider = theme.fg("dim", " ── ");
     box.addChild(new Text(`${titleOrch}${divider}${titleRouter}`, 0, 0));
 
-    // User prompt (bounded to max 2 lines with ellipsis)
-    const promptLines = formatPromptEllipsis(data.userPrompt, 70, 2);
-    for (let i = 0; i < promptLines.length; i++) {
-      const line = promptLines[i] ?? "";
-      const label = i === 0 ? theme.fg("dim", "  Solicitud:    ") : theme.fg("dim", "                ");
-      box.addChild(new Text(`${label}${theme.fg("text", line)}`, 0, 0));
-    }
-
     // Smart Router Decision (explicit call & decision line)
     const routerLabel = theme.fg("dim", "  Smart Router: ");
     const latencyPart =
-      data.latencyMs !== undefined
-        ? colorize(`Llamada Laya API (${Math.round(data.latencyMs)} ms)`, palette.active)
-        : colorize("Llamada Laya API", palette.active);
+      data.domain === "direct_tag" || data.latencyMs === 0
+        ? colorize("Invocación Directa (@tag)", palette.action, true)
+        : data.latencyMs !== undefined
+          ? colorize(`Llamada Laya API (${Math.round(data.latencyMs)} ms)`, palette.active)
+          : colorize("Llamada Laya API", palette.active);
     const arrowDecision = theme.fg("dim", " ──► Decisión: ");
     const agentTarget = colorize(`@${data.handle}`, palette.active, true);
     const domainPart = `${theme.fg("dim", " (Dominio: ")}${colorize(data.domain, palette.active)}`;

@@ -1,4 +1,4 @@
-import type {ExtensionAPI} from "@earendil-works/pi-coding-agent";
+import {copyToClipboard, type ExtensionAPI} from "@earendil-works/pi-coding-agent";
 import {type AgentsCatalog, createAgentsCatalog} from "./agents.catalog.ts";
 import {type OrchestratorCommandState, resolveOrchestratorCommand, STATUS_KEY} from "./command.ts";
 import {loadOrchestratorConfigFile, type OrchestratorConfig} from "./config.validator.ts";
@@ -15,7 +15,6 @@ import {
   registerOrchestratorRenderers,
 } from "./tui/decision.renderer.ts";
 import {VIASERA_PALETTE} from "./tui/theme.ts";
-import {registerCollapsibleToolRenderers} from "./tui/tools.renderer.ts";
 import {runSequentialPipeline} from "./workflow.runner.ts";
 
 export interface SmartOrchestratorOptions {
@@ -32,7 +31,6 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     const config: OrchestratorConfig | undefined = loaded.ok ? loaded.value : undefined;
 
     registerOrchestratorRenderers(pi, () => config?.theme?.colors ?? VIASERA_PALETTE);
-    registerCollapsibleToolRenderers(pi);
 
     const classifier = options.classifier ?? (config ? createLayaClassifier(config) : undefined);
 
@@ -66,6 +64,54 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
         ctx.ui.setStatus(STATUS_KEY, "orchestrator: active");
       }
       await logger.log({event: "session_start", status: state.enabled ? "active" : "disabled"});
+    });
+
+    let activeToolTimer: ReturnType<typeof setInterval> | undefined;
+    let toolStartTime = 0;
+    let currentToolName = "";
+    let currentToolArgs = "";
+
+    pi.on("tool_execution_start", (event, ctx) => {
+      toolStartTime = Date.now();
+      currentToolName = event.toolName;
+
+      let summary = "";
+      if (event.toolName === "bash" && typeof event.args?.command === "string") {
+        const cmd = event.args.command.trim().replace(/\s+/g, " ");
+        summary = cmd.length > 35 ? `${cmd.slice(0, 32)}…` : cmd;
+      } else if (typeof event.args?.path === "string") {
+        summary = event.args.path.split("/").pop() ?? event.args.path;
+      } else if (typeof event.args?.pattern === "string") {
+        summary = `/${event.args.pattern}/`;
+      }
+      currentToolArgs = summary;
+
+      if (activeToolTimer) clearInterval(activeToolTimer);
+
+      const updateStatus = () => {
+        const elapsedSec = Math.floor((Date.now() - toolStartTime) / 1000);
+        const secText = elapsedSec > 0 ? ` (${elapsedSec}s)` : "";
+        ctx.ui.setStatus("tool_activity", `⚡ ${currentToolName}${secText}: ${currentToolArgs}`);
+      };
+
+      updateStatus();
+      activeToolTimer = setInterval(updateStatus, 1000);
+    });
+
+    pi.on("tool_execution_update", (event, ctx) => {
+      if (event.partialResult) {
+        const elapsedSec = Math.floor((Date.now() - toolStartTime) / 1000);
+        const secText = elapsedSec > 0 ? ` (${elapsedSec}s)` : "";
+        ctx.ui.setStatus("tool_activity", `⚡ ${currentToolName}${secText}: ${currentToolArgs}`);
+      }
+    });
+
+    pi.on("tool_execution_end", (_event, ctx) => {
+      if (activeToolTimer) {
+        clearInterval(activeToolTimer);
+        activeToolTimer = undefined;
+      }
+      ctx.ui.setStatus("tool_activity", undefined);
     });
 
     pi.on("before_agent_start", async event => {
@@ -249,6 +295,25 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
         }
         ctx.ui.notify(outcome.message, outcome.tone);
       },
+    });
+
+    // Input Clipboard Utilities
+    const copyInputHandler = async (
+      _args: string,
+      ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext
+    ) => {
+      const editorText = ctx.ui.getEditorText();
+      if (editorText && editorText.trim().length > 0) {
+        await copyToClipboard(editorText);
+        ctx.ui.notify("Texto del input copiado al portapapeles", "info");
+      } else {
+        ctx.ui.notify("El editor de entrada está vacío", "warning");
+      }
+    };
+
+    pi.registerCommand("copy-input", {
+      description: "Copiar el texto actual del editor de entrada al portapapeles",
+      handler: copyInputHandler,
     });
   };
 }

@@ -9,6 +9,7 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import type {AgentsCatalog} from "./agents.catalog.ts";
+import {composeSystemPrompt, DEFAULT_STEP_RULES, loadAgentContext} from "./context.injector.ts";
 import {fail, type Result} from "./guards.ts";
 
 export interface AgentRunRequest {
@@ -18,6 +19,10 @@ export interface AgentRunRequest {
   thinkingLevel?: string;
   description?: string;
   maxTurns?: number;
+  /** Rule names from `~/.pi/agent/rules` injected into the child's system prompt. */
+  rules?: readonly string[];
+  /** Include the project's `AGENTS.md` chain. Defaults to true. */
+  includeProjectContext?: boolean;
   signal?: AbortSignal;
   onTextDelta?: (delta: string, accumulated: string) => void;
   onToolActivity?: (activity: {type: "start" | "end"; toolName: string}) => void;
@@ -79,13 +84,25 @@ export function createNativeAgentRunner(deps: NativeRunnerDeps): NativeAgentRunn
       const agent = agentRes.value;
 
       const modelTarget = request.modelString ?? agent.model;
+      if (modelTarget === undefined || modelTarget.trim().length === 0) {
+        // Never guess: an arbitrary model behind a specialist prompt is exactly the
+        // failure this runner used to hide.
+        return fail("missing_model");
+      }
       const model = resolveModel(modelTarget);
       const thinkingLevel = (request.thinkingLevel ?? agent.thinking ?? "low") as ThinkingLevel;
+
+      const context = loadAgentContext({
+        cwd,
+        rules: request.rules ?? DEFAULT_STEP_RULES,
+        includeProjectContext: request.includeProjectContext ?? true,
+      });
+      const systemPrompt = composeSystemPrompt(agent.systemPrompt, context);
 
       const loader = new DefaultResourceLoader({
         cwd,
         agentDir: getAgentDir(),
-        systemPromptOverride: () => agent.systemPrompt,
+        systemPromptOverride: () => systemPrompt,
         noPromptTemplates: true,
         noThemes: true,
         noContextFiles: true,
@@ -153,6 +170,14 @@ export function createNativeAgentRunner(deps: NativeRunnerDeps): NativeAgentRunn
       }
 
       const durationMs = Date.now() - startTime;
+
+      // A child that answers nothing did not succeed: without this guard an empty
+      // run is reported as `completed`, the pipeline chains an empty artifact into
+      // the next step, and the failure surfaces three steps later as bad code.
+      if (status === "completed" && responseText.trim().length === 0 && turnCount === 0) {
+        status = "error";
+        errorMessage = "empty_response";
+      }
 
       return {
         ok: true,

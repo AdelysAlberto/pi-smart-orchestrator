@@ -2,65 +2,39 @@ import {describe, expect, test} from "bun:test";
 import {type OrchestratorCommandState, resolveOrchestratorCommand} from "../command.ts";
 
 describe("Orchestrator Command", () => {
-  const baseState: OrchestratorCommandState = {
-    enabled: true,
-    configValid: true,
-    switchModel: true,
-    switchThinking: true,
-    switchAgent: true,
-  };
+  const baseState: OrchestratorCommandState = {enabled: true, configValid: true};
 
-  test("toggles orchestrator off and on", () => {
+  test("toggles the pipeline runner off and on", () => {
     const offRes = resolveOrchestratorCommand("off", baseState);
     expect(offRes.enabled).toBe(false);
     expect(offRes.changed).toBe(true);
+    expect(offRes.tone).toBe("warning");
 
-    const onRes = resolveOrchestratorCommand("on", {...baseState, enabled: false});
-    expect(onRes.enabled).toBe(true);
-    expect(onRes.changed).toBe(true);
+    const flipped = resolveOrchestratorCommand("on", {...baseState, enabled: false});
+    expect(flipped.enabled).toBe(true);
+    expect(flipped.changed).toBe(true);
   });
 
-  test("toggles model switch independently", () => {
-    const modelOff = resolveOrchestratorCommand("model off", baseState);
-    expect(modelOff.switchModel).toBe(false);
-    expect(modelOff.switchThinking).toBe(true);
-    expect(modelOff.switchAgent).toBe(true);
-    expect(modelOff.changed).toBe(true);
-
-    const modelOn = resolveOrchestratorCommand("model on", {...baseState, switchModel: false});
-    expect(modelOn.switchModel).toBe(true);
-    expect(modelOn.changed).toBe(true);
+  test("reports no change when the state already matches", () => {
+    expect(resolveOrchestratorCommand("on", baseState).changed).toBe(false);
+    expect(resolveOrchestratorCommand("off", {...baseState, enabled: false}).changed).toBe(false);
   });
 
-  test("toggles thinking switch independently", () => {
-    const thinkingOff = resolveOrchestratorCommand("thinking off", baseState);
-    expect(thinkingOff.switchThinking).toBe(false);
-    expect(thinkingOff.switchModel).toBe(true);
-    expect(thinkingOff.switchAgent).toBe(true);
-    expect(thinkingOff.changed).toBe(true);
-
-    const thinkingOn = resolveOrchestratorCommand("thinking on", {...baseState, switchThinking: false});
-    expect(thinkingOn.switchThinking).toBe(true);
-    expect(thinkingOn.changed).toBe(true);
+  test("says the router keeps routing when the pipeline runner is off", () => {
+    const offRes = resolveOrchestratorCommand("off", baseState);
+    expect(offRes.message).toContain("router sigue enrutando");
   });
 
-  test("toggles agent switch independently", () => {
-    const agentOff = resolveOrchestratorCommand("agent off", baseState);
-    expect(agentOff.switchAgent).toBe(false);
-    expect(agentOff.switchModel).toBe(true);
-    expect(agentOff.switchThinking).toBe(true);
-    expect(agentOff.changed).toBe(true);
-
-    const agentOn = resolveOrchestratorCommand("agent on", {...baseState, switchAgent: false});
-    expect(agentOn.switchAgent).toBe(true);
-    expect(agentOn.changed).toBe(true);
-  });
-
-  test("reports detailed status on unknown command", () => {
+  test("reports status, and never claims a model decision", () => {
     const statusRes = resolveOrchestratorCommand("status", baseState);
     expect(statusRes.changed).toBe(false);
-    expect(statusRes.message).toContain("Agente: ON");
-    expect(statusRes.message).toContain("Modelo: ON");
-    expect(statusRes.message).toContain("Thinking: ON");
+    expect(statusRes.status).toBe("orchestrator: active");
+    expect(statusRes.message).toContain("modelo y thinking los decide el router");
+  });
+
+  test("reports an invalid config as inactive even when enabled", () => {
+    const statusRes = resolveOrchestratorCommand("", {...baseState, configValid: false});
+    expect(statusRes.status).toBe("orchestrator: off");
+    expect(statusRes.message).toContain("Inactivo");
   });
 });

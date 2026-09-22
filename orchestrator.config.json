@@ -1,13 +1,9 @@
 {
   "enabled": true,
-  "switchModel": false,
-  "switchThinking": false,
-  "switchAgent": true,
-  "classifierConfig": "./laya.config.json",
-  "agentsDir": "/Volumes/Datos/Projects/utils/agents/agents-pi/agents",
-  "logFile": "~/.pi/agent/smart-orchestrator.log",
   "maxInFlight": 3,
   "debug": false,
+  "agentsDir": "/Volumes/Datos/Projects/utils/agents/agents-pi/agents",
+  "logFile": "~/.pi/agent/smart-orchestrator.log",
   "theme": {
     "colors": {
       "active": "#00E5FF",
@@ -16,90 +12,52 @@
       "surface": "#0B0F17"
     }
   },
-  "routes": {
-    "code": {
-      "handle": "homero",
-      "fastPath": true
-    },
-    "architecture": {
-      "handle": "sheldon",
-      "fastPath": false,
-      "workflow": "plan-and-build"
-    },
-    "ux": {
-      "handle": "edna",
-      "fastPath": true
-    },
-    "review": {
-      "handle": "tio-bob",
-      "fastPath": true
-    },
-    "security": {
-      "handle": "gorgory",
-      "fastPath": true
-    },
-    "legal": {
-      "handle": "saul",
-      "fastPath": true
-    },
-    "finance": {
-      "handle": "contador",
-      "fastPath": true
-    },
-    "general": {
-      "handle": "none"
-    },
-    "default": {
-      "handle": "homero"
-    }
-  },
   "workflows": {
     "plan-and-build": {
-      "description": "Workflow de dos etapas: Diseño de arquitectura formal seguido de construcción de código limpio",
+      "description": "Dos etapas: plan de arquitectura aprobado por el usuario, seguido de la construccion",
       "steps": [
         {
           "step": 1,
-          "name": "Diseño de Arquitectura",
+          "name": "Diseno de Arquitectura",
           "agent": "sheldon",
           "effort": "high",
-          "output": "artifacts/architecture.md",
-          "requireApproval": true
+          "requireApproval": true,
+          "rules": ["engineering-invariants", "runtime", "verification-checklist", "commits"]
         },
         {
           "step": 2,
-          "name": "Construcción de Código",
+          "name": "Construccion de Codigo",
           "agent": "homero",
           "effort": "low",
-          "inputFrom": "artifacts/architecture.md"
+          "inputFrom": "step 1",
+          "rules": [
+            "engineering-invariants",
+            "verification-checklist",
+            "commits",
+            "frontend",
+            "backend",
+            "react-native"
+          ]
         }
       ]
     },
     "security-audit": {
-      "description": "Auditoría de seguridad y revisión de código en paralelo",
+      "description": "Auditoria de seguridad seguida de revision de estandares",
       "steps": [
         {
           "step": 1,
-          "name": "Auditoría de Vulnerabilidades",
+          "name": "Auditoria de Vulnerabilidades",
           "agent": "gorgory",
           "effort": "high"
         },
         {
           "step": 2,
-          "name": "Revisión de Estándares",
+          "name": "Revision de Estandares",
           "agent": "tio-bob",
-          "effort": "low"
+          "effort": "low",
+          "inputFrom": "step 1"
         }
       ]
-    }
-  },
-  "effortModels": {
-    "low": {
-      "model": "deepseek-ryg/deepseek-flash",
-      "thinking": "low"
-    },
-    "high": {
-      "model": "deepseek-ryg/deepseek-v4-pro",
-      "thinking": "high"
     }
   }
 }

@@ -2,11 +2,14 @@ import type {OrchestratorConfig, WorkflowConfig, WorkflowStepConfig} from "./con
 import {fail, type Result} from "./guards.ts";
 import type {AgentRunOutput, NativeAgentRunner} from "./native.agent.runner.ts";
 import type {PipelineProgressData, SwarmAgentStatus} from "./tui/decision.renderer.ts";
+import type {EffortModel} from "./workflow.handoff.ts";
 
 export interface StepExecutionResult {
   step: number;
   name: string;
   agent: string;
+  /** `model:thinking` actually used, for the closing progress entry. */
+  model: string;
   payload: AgentRunOutput;
 }
 
@@ -14,16 +17,27 @@ export interface SequentialPipelineOptions {
   workflowName: string;
   workflow: WorkflowConfig;
   userPrompt: string;
-  config: OrchestratorConfig;
+  /**
+   * Effort table sent by the router with the request. The orchestrator has no table
+   * of its own: this is the only source of (model, thinking) for a step.
+   */
+  effortModels: Record<string, EffortModel>;
   runner: NativeAgentRunner;
   onProgress?: (progress: PipelineProgressData) => void;
   onApprovalRequired?: (step: WorkflowStepConfig, previousResult: string) => Promise<boolean>;
 }
 
+/** `(model, thinking)` of a step: its own tier, or the low tier as documented. */
+function effortOf(table: Record<string, EffortModel>, effort: string): Result<EffortModel> {
+  const preset = table[effort] ?? table.low;
+  if (preset === undefined) return fail(`effort_model_missing:${effort}`);
+  return {ok: true, value: preset};
+}
+
 export async function runSequentialPipeline(
   options: SequentialPipelineOptions
 ): Promise<Result<StepExecutionResult[]>> {
-  const {workflowName, workflow, userPrompt, config, runner, onProgress, onApprovalRequired} = options;
+  const {workflowName, workflow, userPrompt, effortModels, runner, onProgress, onApprovalRequired} = options;
   const results: StepExecutionResult[] = [];
   let lastOutput = "";
 
@@ -32,8 +46,10 @@ export async function runSequentialPipeline(
     if (!step) continue;
 
     const effort = step.effort ?? "low";
-    const effortModel = config.effortModels[effort] ?? config.effortModels.low ?? {model: "default"};
-    const modelStr = `${effortModel.model}${effortModel.thinking ? `:${effortModel.thinking}` : ""}`;
+    const preset = effortOf(effortModels, effort);
+    if (!preset.ok) return preset;
+    const {model, thinking} = preset.value;
+    const modelStr = `${model}${thinking ? `:${thinking}` : ""}`;
 
     onProgress?.({
       workflowName,
@@ -55,9 +71,10 @@ export async function runSequentialPipeline(
     const runRes = await runner.run({
       agentHandle: step.agent,
       prompt: stepPrompt,
-      modelString: effortModel.model,
-      thinkingLevel: effortModel.thinking,
+      modelString: model,
+      thinkingLevel: thinking ?? undefined,
       description: `${workflowName} - ${step.name}`,
+      rules: step.rules,
       onToolActivity: activity => {
         onProgress?.({
           workflowName,
@@ -86,6 +103,7 @@ export async function runSequentialPipeline(
       step: step.step,
       name: step.name,
       agent: step.agent,
+      model: modelStr,
       payload: runOutput,
     });
 
@@ -130,12 +148,14 @@ export interface SwarmExecutionResult {
 export interface ParallelSwarmOptions {
   tasks: SwarmTask[];
   config: OrchestratorConfig;
+  /** Same table the sequential pipeline resolves against. */
+  effortModels: Record<string, EffortModel>;
   runner: NativeAgentRunner;
   onProgress?: (inFlight: SwarmAgentStatus[]) => void;
 }
 
 export async function runParallelSwarm(options: ParallelSwarmOptions): Promise<Result<SwarmExecutionResult[]>> {
-  const {tasks, config, runner, onProgress} = options;
+  const {tasks, config, effortModels, runner, onProgress} = options;
   const maxInFlight = Math.max(1, config.maxInFlight);
   const results: SwarmExecutionResult[] = [];
   const inFlightMap = new Map<string, {agent: string; task: string; startTime: number}>();
@@ -156,41 +176,30 @@ export async function runParallelSwarm(options: ParallelSwarmOptions): Promise<R
 
   async function launchTask(task: SwarmTask): Promise<void> {
     const effort = task.effort ?? "low";
-    const effortModel = config.effortModels[effort] ?? config.effortModels.low ?? {model: "default"};
+    const preset = effortOf(effortModels, effort);
     const taskId = `${task.agent}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
     inFlightMap.set(taskId, {agent: task.agent, task: task.taskName, startTime: Date.now()});
     notifyProgress();
 
     try {
+      if (!preset.ok) {
+        results.push({agent: task.agent, taskName: task.taskName, payload: errorPayload(task.agent, preset.reason)});
+        return;
+      }
       const runRes = await runner.run({
         agentHandle: task.agent,
         prompt: task.prompt,
-        modelString: effortModel.model,
-        thinkingLevel: effortModel.thinking,
+        modelString: preset.value.model,
+        thinkingLevel: preset.value.thinking ?? undefined,
         description: task.taskName,
       });
 
-      if (runRes.ok) {
-        results.push({
-          agent: task.agent,
-          taskName: task.taskName,
-          payload: runRes.value,
-        });
-      } else {
-        results.push({
-          agent: task.agent,
-          taskName: task.taskName,
-          payload: {
-            agent: task.agent,
-            status: "error",
-            result: "",
-            durationMs: 0,
-            turns: 0,
-            error: runRes.reason,
-          },
-        });
-      }
+      results.push({
+        agent: task.agent,
+        taskName: task.taskName,
+        payload: runRes.ok ? runRes.value : errorPayload(task.agent, runRes.reason),
+      });
     } finally {
       inFlightMap.delete(taskId);
       notifyProgress();
@@ -214,4 +223,8 @@ export async function runParallelSwarm(options: ParallelSwarmOptions): Promise<R
   await Promise.all(runningPromises);
 
   return {ok: true, value: results};
+}
+
+function errorPayload(agent: string, error: string): AgentRunOutput {
+  return {agent, status: "error", result: "", durationMs: 0, turns: 0, error};
 }

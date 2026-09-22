@@ -16,32 +16,28 @@
 
 ## Overview
 
-Pi Smart Orchestrator is a standalone multi-agent orchestration engine for [Pi](https://github.com/badlogic/pi-mono). It combines sub-100ms local neural intent classification via **Laya** (running directly on Apple Silicon MPS) with native in-session agent dispatch, eliminating meta-LLM supervisor loops and third-party daemon dependencies.
+Pi Smart Orchestrator is the pipeline runner for [Pi](https://github.com/badlogic/pi-mono). It executes multi-step workflows (design, approval gate, build) with real specialist subagents, and it does nothing else: it does not intercept `input`, it does not classify, and it does not choose a model.
 
-Unlike legacy subagent wrappers that swallow user input and hide intermediate turns in background transcripts, Pi Smart Orchestrator executes specialists directly within the interactive terminal session. Every turn features live streaming, tool activity transparency, dynamic model and reasoning-tier switching, and rich visual telemetry formatted with Viasera design tokens.
+[pi-laya-router](../pi-laya-router) is the only interceptor of the `input` event and the only owner of the `(model, thinking)` pair. When its classification says the turn needs more than one specialist, it hands the turn over on `orchestrator:workflow` — with the effort table included — and this extension runs the steps. A refused or unacknowledged handover goes back to the main agent, never into a silent void.
 
 ---
 
 ## What It Solves
 
-* **Terminal Opacity & Swallowed Prompts**: Legacy extensions intercept user input with detached handlers, making prompts disappear from the terminal. Pi Smart Orchestrator renders the user prompt and routing metadata upfront via `OrchestratorTaskCard` (with 2-line ellipsis) and streams execution directly in the live session.
-* **Meta-LLM Supervisor Overhead**: Eliminates slow multi-minute supervisor deliberations and token wastage by executing deterministic routing in pure TypeScript backed by local Laya neural inference (< 100 ms).
-* **Dependency & Collision Fragility**: Operates completely autonomously via the `@earendil-works/pi-coding-agent` SDK with zero reliance on external process managers or third-party daemon bridges.
-* **Terminal Clutter & Output Bloat**: Integrates collapsible tool renderers for `bash`, `read`, `edit`, `write`, `find`, `grep`, and `ls` so that tool runs stay compact and expand on demand with `Ctrl+O`.
-* **Zero-Shot Context & Multilingual Continuation**: Disambiguates whether short phrases (*"Retoma..."*, *"carry on"*, *"let's do it"*) represent task continuations or new topics using neural context evaluation rather than brittle regex lists.
+* **Supervisor Overhead**: no meta-LLM decides what to do. The router classifies in ~30 ms, the pipeline is declared in JSON, and the steps run.
+* **Two Truths About Models**: the model table lives in one file (`router.config.json`). This extension has no model configuration to drift out of sync.
+* **Context Loss Inside Pipelines**: every child gets an explicit system prompt, the `AGENTS.md` chain, and the rules named by its step — read from disk, not left to the model's goodwill.
+* **Terminal Clutter & Output Bloat**: collapsible tool renderers for `bash`, `read`, `edit`, `write`, `find`, `grep` and `ls`, so tool runs stay compact and expand with `Ctrl+O`.
 
 ---
 
 ## Key Features
 
-* **Sub-100ms Neural Classification**: Queries `laya-api` over loopback HTTP with explicit client tracing (`X-Client: pi-smart-orchestrator`), evaluating technical domain, intent type, and analytical effort without remote API cost or network latency.
-* **Modular Configuration (DIP Architecture)**: Separates orchestration rules (`orchestrator.config.json`) from classifier definitions (`laya.config.json`).
-* **Dynamic Specialist Persona & Model Switching**: Resolves the optimal specialist (`homero`, `sheldon`, `edna`, `tio-bob`, `gorgory`, `saul`, `contador`) and automatically adjusts the session model, thinking tier (`low`/`high`), authorized tools, and system prompt via `before_agent_start`.
-* **Multi-Step Pipelines & Swarms**:
-  - **Sequential Pipeline**: Chains multi-agent workflows (e.g. `plan-and-build`: Sheldon architecture blueprint -> Homero implementation -> Tio Bob code review) with human approval gates.
-  - **Parallel Swarm**: Concurrent multi-agent execution governed by bounded `maxInFlight` limits.
-* **Viasera Visual Identity**: Custom terminal cards built with `@earendil-works/pi-tui` utilizing configurable theme colors (Electric Cyan, Header Lime `#A3BF06`, Volcanic Orange, and Deep Asphalt).
-* **Minimal Collapsible Tool Renderers**: Sleek one-line command previews in collapsed mode that toggle to full stdout/stderr when pressing `Ctrl+O`.
+* **Sequential Pipelines**: declared in `orchestrator.config.json`, run with the per-step model the router sends and an optional human approval gate between steps (`plan-and-build`: plan, approval, build).
+* **Parallel Swarm**: concurrent execution governed by `maxInFlight`, for fan-out tasks.
+* **Deterministic Context Injection**: `noContextFiles` children are given the `AGENTS.md` chain and the `rules/*.md` named by the step (`context.injector.ts`), with a missing rule reported inside the prompt instead of failing the step.
+* **Acknowledged Handover**: the router only reports a pipeline as handled when this extension acknowledged the request; every refusal carries a reason code.
+* **Viasera Visual Identity**: terminal cards built with `@earendil-works/pi-tui` using configurable theme colors (Electric Cyan, Header Lime `#A3BF06`, Volcanic Orange, Deep Asphalt).
 
 ---
 
@@ -101,17 +97,15 @@ Launch Pi in any project directory and inspect orchestrator status:
 
 ## Configuration Architecture
 
-Configuration is partitioned into two clean, decoupled files according to the Single Responsibility Principle:
-
-### 1. Orchestration Rules: `orchestrator.config.json`
+One file, and only for pipelines:
 
 ```json
 {
   "enabled": true,
-  "classifierConfig": "./laya.config.json",
+  "maxInFlight": 3,
+  "debug": false,
   "agentsDir": "/Volumes/Datos/Projects/utils/agents/agents-pi/agents",
   "logFile": "~/.pi/agent/smart-orchestrator.log",
-  "maxInFlight": 3,
   "theme": {
     "colors": {
       "active": "#00E5FF",
@@ -120,74 +114,29 @@ Configuration is partitioned into two clean, decoupled files according to the Si
       "surface": "#0B0F17"
     }
   },
-  "routes": {
-    "code": { "handle": "homero", "fastPath": true },
-    "architecture": { "handle": "sheldon", "fastPath": false, "workflow": "plan-and-build" },
-    "ux": { "handle": "edna", "fastPath": true },
-    "review": { "handle": "tio-bob", "fastPath": true },
-    "security": { "handle": "gorgory", "fastPath": true },
-    "legal": { "handle": "saul", "fastPath": true },
-    "finance": { "handle": "contador", "fastPath": true },
-    "general": { "handle": "none" },
-    "default": { "handle": "homero" }
-  },
   "workflows": {
     "plan-and-build": {
-      "description": "Two-stage workflow: Formal architecture design followed by clean code construction",
+      "description": "Plan de arquitectura aprobado por el usuario, seguido de la construccion",
       "steps": [
-        { "step": 1, "name": "Architecture Design", "agent": "sheldon", "effort": "high", "output": "artifacts/architecture.md", "requireApproval": true },
-        { "step": 2, "name": "Code Construction", "agent": "homero", "effort": "low", "inputFrom": "artifacts/architecture.md" }
+        { "step": 1, "name": "Diseno de Arquitectura", "agent": "sheldon", "effort": "high", "requireApproval": true },
+        { "step": 2, "name": "Construccion de Codigo", "agent": "homero", "effort": "low", "inputFrom": "step 1" }
       ]
     }
-  },
-  "effortModels": {
-    "low": { "model": "deepseek-ryg/deepseek-flash", "thinking": "low" },
-    "high": { "model": "deepseek-ryg/deepseek-v4-pro", "thinking": "high" }
   }
 }
 ```
 
-### 2. Neural Classifier Definition: `laya.config.json`
+Per step:
 
-```json
-{
-  "endpoint": "http://127.0.0.1:8090/analyze",
-  "timeoutMs": 1500,
-  "checkpoint": "",
-  "questions": {
-    "intent_type": {
-      "type": "choice",
-      "instructions": "Determine if the current user request is continuing the previous context or introducing a new task.",
-      "criteria": {
-        "continuation": "Continuing, resuming, following up on, retrying, approving, or asking to proceed with the previous task.",
-        "new_task": "Starting a new standalone task, asking a new question, or changing the subject."
-      }
-    },
-    "domain": {
-      "type": "choice",
-      "instructions": "Classify the high-level intent into the most accurate technical discipline.",
-      "criteria": {
-        "code": "Direct implementation, writing code, fixing bugs, unit testing, scripting, editing existing codebase.",
-        "architecture": "System design, software architecture, technical blueprints, module boundaries, domain design, workflow planning, DDL schemas.",
-        "ux": "UI components, styling, CSS, themes, design tokens, UX wireframes.",
-        "review": "Code review, PR/MR auditing, diff analysis, Clean Code standards.",
-        "security": "Security audits, OWASP vulnerabilities, secret leaks, threat modeling.",
-        "legal": "Legal compliance, GDPR, terms of service, IP, licensing.",
-        "finance": "Accounting, taxes, IRPF, VAT, deductions, billing rules, financial strategy.",
-        "general": "General conversation, chit-chat, greetings, trivial non-technical queries."
-      }
-    },
-    "effort": {
-      "type": "choice",
-      "instructions": "Rate the analytical complexity and reasoning required for this task.",
-      "criteria": {
-        "low": "Straightforward changes, direct bugfixes, simple questions, routine tasks.",
-        "high": "Complex architectural decisions, major features, subtle bugs, security/legal analysis."
-      }
-    }
-  }
-}
-```
+| Key | Meaning |
+| :--- | :--- |
+| `agent` | Handle resolved against `agentsDir`; its `.md` is the child's system prompt |
+| `effort` | Tier (`low`/`high`) resolved against the table the **router** sends with the request |
+| `inputFrom` | Name of the earlier step whose output is prepended as context |
+| `requireApproval` | Stops before the next step until the user confirms |
+| `rules` | Rule names from `~/.pi/agent/rules` injected into the step. Defaults to the universal set |
+
+There is no route table and no classifier definition here. Which turn reaches a workflow is decided by `router.config.json` (`scope` axis plus `scopeWorkflows`), and the model of every step comes from that same file's `effortModels`.
 
 ---
 
@@ -198,29 +147,28 @@ pi-smart-orchestrator/
 ├── package.json                    # Package manifest with pi.extensions entrypoint
 ├── tsconfig.json                   # Strict TypeScript compiler options
 ├── biome.json                      # Code formatting and linting rules
-├── orchestrator.config.json        # SSOT for routes, workflows, and theme colors
-├── laya.config.json                # Dedicated Laya AI zero-shot classifier configuration
+├── orchestrator.config.json        # Workflows, per-step rules, and theme colors
 ├── index.ts                        # Root module re-export
 ├── README.md                       # Canonical technical documentation
 └── extensions/
     └── smart-orchestrator/
-        ├── index.ts                # Main extension bootstrap, turn interceptor & context hydration
+        ├── index.ts                # Composition: lifecycle, handover listener, commands
         ├── guards.ts               # Functional Result pattern & boundary type guards
         ├── paths.ts                # Configuration & directory path resolution
         ├── agents.catalog.ts       # Specialist markdown discovery and frontmatter parser
-        ├── native.agent.runner.ts  # Native agent runner & model resolver
-        ├── analyze.parser.ts       # Laya API schema parser & metadata extractor
-        ├── laya.client.ts          # HTTP client with timeout & X-Client header tracking
-        ├── config.validator.ts     # Schema validation for orchestrator & laya configs
+        ├── native.agent.runner.ts  # In-process child session runner & model resolver
+        ├── context.injector.ts     # AGENTS.md chain + rules injection for a child
+        ├── workflow.handoff.ts     # Router handover contract and acknowledgement
+        ├── config.validator.ts     # Schema validation for orchestrator.config.json
         ├── command.ts              # /orchestrator slash command handler
         ├── workflow.runner.ts      # Sequential pipeline & parallel swarm runners
-        ├── orchestrator.engine.ts  # Fast path, context enrichment & workflow routing logic
         ├── logger.ts               # Structured JSON audit logging
         ├── tui/
         │   ├── theme.ts            # Dynamic Viasera color tokens and styling helpers
-        │   ├── decision.renderer.ts # Task card, pipeline, and swarm UI renderers
+        │   ├── decision.renderer.ts # Pipeline and swarm UI renderers
+        │   ├── settings.menu.ts    # /orchestrator menu
         │   └── tools.renderer.ts   # Minimal collapsible tool renderers (bash/read/edit/etc.)
-        └── __tests__/              # Deterministic test suite (18/18 unit tests)
+        └── __tests__/              # Deterministic test suite (40 unit tests)
 ```
 
 ---

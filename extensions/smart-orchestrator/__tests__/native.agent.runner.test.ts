@@ -38,4 +38,17 @@ describe("Native Agent Runner", () => {
     if (res.ok) return;
     expect(res.reason).toContain("agent_not_found");
   });
+
+  test("refuses to run without a model instead of picking an arbitrary one", async () => {
+    const runner = createNativeAgentRunner({catalog});
+    const res = await runner.run({
+      agentHandle: "homero",
+      prompt: "test",
+      modelString: "   ",
+    });
+
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.reason).toBe("missing_model");
+  });
 });

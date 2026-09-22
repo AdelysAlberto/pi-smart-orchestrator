@@ -1,16 +1,16 @@
-import {copyToClipboard, type ExtensionAPI} from "@earendil-works/pi-coding-agent";
+import {
+  copyToClipboard,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {type AgentsCatalog, createAgentsCatalog} from "./agents.catalog.ts";
 import {type OrchestratorCommandState, resolveOrchestratorCommand, STATUS_KEY} from "./command.ts";
-import {loadOrchestratorConfigFile, type OrchestratorConfig} from "./config.validator.ts";
-import {extractAndNormalizeImagesFromText} from "./image.processor.ts";
-import {type Classifier, createLayaClassifier} from "./laya.client.ts";
+import {loadOrchestratorConfigFile, type OrchestratorConfig, type WorkflowConfig} from "./config.validator.ts";
 import {createOrchestratorLogger, type OrchestratorLogger} from "./logger.ts";
-import {createGenericModelResolver, createNativeAgentRunner, type NativeAgentRunner} from "./native.agent.runner.ts";
-import {processInput} from "./orchestrator.engine.ts";
+import {createNativeAgentRunner, type NativeAgentRunner} from "./native.agent.runner.ts";
 import {defaultConfigPath} from "./paths.ts";
 import {
-  ORCHESTRATOR_TASK_ENTRY_TYPE,
-  type OrchestratorTaskCardData,
   PIPELINE_PROGRESS_ENTRY_TYPE,
   type PipelineProgressData,
   registerOrchestratorRenderers,
@@ -18,15 +18,35 @@ import {
 import {showOrchestratorSettingsMenu} from "./tui/settings.menu.ts";
 import {VIASERA_PALETTE} from "./tui/theme.ts";
 import {registerCollapsibleToolRenderers} from "./tui/tools.renderer.ts";
+import {
+  ackChannel,
+  buildAck,
+  buildRefusal,
+  parseHandoff,
+  WORKFLOW_CHANNEL,
+  type WorkflowHandoff,
+} from "./workflow.handoff.ts";
 import {runSequentialPipeline} from "./workflow.runner.ts";
+
+/** Characters of a step's output that reach the progress entry. */
+const RESULT_PREVIEW_CHARS = 600;
 
 export interface SmartOrchestratorOptions {
   configPath?: string;
-  classifier?: Classifier;
   runner?: NativeAgentRunner;
   catalog?: AgentsCatalog;
 }
 
+/**
+ * Pi Smart Orchestrator: the pipeline runner.
+ *
+ * It does **not** intercept `input` and does **not** decide a model. pi-laya-router
+ * is the only interceptor and the only owner of the effort table; when a turn is
+ * scoped as a pipeline the router hands it over on `orchestrator:workflow` and this
+ * extension runs the steps with the (model, thinking) pairs that came in the
+ * request. Every refusal is answered as an acknowledgement, so the router can send
+ * the turn back to the main agent instead of dropping it.
+ */
 export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}): (pi: ExtensionAPI) => void {
   return pi => {
     const configPath = options.configPath ?? defaultConfigPath();
@@ -36,14 +56,9 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     registerOrchestratorRenderers(pi, () => config?.theme?.colors ?? VIASERA_PALETTE);
     registerCollapsibleToolRenderers(pi);
 
-    const classifier = options.classifier ?? (config ? createLayaClassifier(config) : undefined);
-
     const state: OrchestratorCommandState = {
       enabled: config?.enabled === true,
       configValid: loaded.ok,
-      switchModel: config?.switchModel ?? true,
-      switchThinking: config?.switchThinking ?? true,
-      switchAgent: config?.switchAgent ?? true,
     };
 
     const logger: OrchestratorLogger = createOrchestratorLogger({
@@ -52,13 +67,12 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     });
 
     let catalog: AgentsCatalog = options.catalog ?? createAgentsCatalog(config?.agentsDir);
-    let modelRegistry: import("@earendil-works/pi-coding-agent").ModelRegistry | undefined;
     let runner: NativeAgentRunner | undefined = options.runner;
-    let pendingSpecialistPrompt: string | undefined;
+    let sessionCtx: ExtensionContext | undefined;
 
     pi.on("session_start", async (_event, ctx) => {
+      sessionCtx = ctx;
       catalog = options.catalog ?? createAgentsCatalog(config?.agentsDir);
-      modelRegistry = ctx.modelRegistry;
       runner =
         options.runner ??
         createNativeAgentRunner({
@@ -105,12 +119,10 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
       activeToolTimer = setInterval(updateStatus, 1000);
     });
 
-    pi.on("tool_execution_update", (event, ctx) => {
-      if (event.partialResult) {
-        const elapsedSec = Math.floor((Date.now() - toolStartTime) / 1000);
-        const secText = elapsedSec > 0 ? ` (${elapsedSec}s)` : "";
-        ctx.ui.setStatus("tool_activity", `⚡ ${currentToolName}${secText}: ${currentToolArgs}`);
-      }
+    pi.on("tool_execution_update", (_event, ctx) => {
+      const elapsedSec = Math.floor((Date.now() - toolStartTime) / 1000);
+      const secText = elapsedSec > 0 ? ` (${elapsedSec}s)` : "";
+      ctx.ui.setStatus("tool_activity", `⚡ ${currentToolName}${secText}: ${currentToolArgs}`);
     });
 
     pi.on("tool_execution_end", (_event, ctx) => {
@@ -121,238 +133,152 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
       ctx.ui.setStatus("tool_activity", undefined);
     });
 
-    pi.on("before_agent_start", async event => {
-      if (pendingSpecialistPrompt) {
-        const promptToInject = pendingSpecialistPrompt;
-        pendingSpecialistPrompt = undefined;
-        return {
-          systemPrompt: `${event.systemPrompt}\n\n${promptToInject}`,
-        };
-      }
-      return undefined;
-    });
-
-    // Support context_with_system event in new Pi runtime for verbatim prompt injection
-    (pi as unknown as {on(event: string, handler: (event: {messages: readonly unknown[]}) => unknown): void}).on(
-      "context_with_system",
-      async (event: {messages: readonly unknown[]}) => {
-        if (pendingSpecialistPrompt && event.messages.length > 0) {
-          const promptToInject = pendingSpecialistPrompt;
-          pendingSpecialistPrompt = undefined;
-
-          const updatedMessages = [...event.messages] as Array<{role?: string; content?: unknown}>;
-          const lead = updatedMessages[0];
-          if (lead && lead.role === "system") {
-            const leadContent = Array.isArray(lead.content)
-              ? lead.content
-              : [{type: "text", text: String(lead.content ?? "")}];
-
-            const textPart = leadContent.find((p: {type?: string; text?: string}) => p?.type === "text") as
-              | {type: string; text: string}
-              | undefined;
-            if (textPart && typeof textPart.text === "string") {
-              textPart.text = `${textPart.text}\n\n${promptToInject}`;
-            } else {
-              leadContent.push({type: "text", text: promptToInject});
-            }
-            updatedMessages[0] = {...lead, content: leadContent};
-            return {messages: updatedMessages};
-          }
-        }
-        return undefined;
-      }
-    );
-
-    interface EntriesProvider {
-      getEntries(): readonly unknown[];
-    }
-
-    function extractPreviousUserPrompt(sessionManager?: EntriesProvider): string | undefined {
-      if (!sessionManager) return undefined;
+    /**
+     * TUI entries are cosmetic: a pipeline must never die because the session it was
+     * handed to has been replaced or reloaded. Pi invalidates a captured `pi`/ctx
+     * after `newSession`/`fork`/`switchSession`/`reload`, and a detached pipeline
+     * outlives any of them, so every UI call is guarded and the loss is logged.
+     */
+    const progress = (data: PipelineProgressData) => {
       try {
-        const entries = sessionManager.getEntries();
-        for (let i = entries.length - 1; i >= 0; i--) {
-          const entry = entries[i];
-          if (
-            entry &&
-            typeof entry === "object" &&
-            "type" in entry &&
-            (entry as {type: string}).type === "message" &&
-            "message" in entry
-          ) {
-            const msg = (entry as {message: {role?: string; content?: unknown}}).message;
-            if (msg?.role === "user") {
-              if (typeof msg.content === "string" && msg.content.trim().length > 0) {
-                return msg.content.trim();
-              }
-              if (Array.isArray(msg.content)) {
-                const textPart = msg.content.find(
-                  (p: {type?: string; text?: string}) => p?.type === "text" && typeof p?.text === "string"
-                );
-                if (textPart?.text && textPart.text.trim().length > 0) return textPart.text.trim();
-              }
-            }
-          }
-        }
-      } catch {
-        return undefined;
+        pi.appendEntry<PipelineProgressData>(PIPELINE_PROGRESS_ENTRY_TYPE, data);
+      } catch (err: unknown) {
+        void logger.log({
+          event: "progress_dropped",
+          workflowName: data.workflowName,
+          reason: err instanceof Error ? err.message : String(err),
+        });
       }
-      return undefined;
-    }
+    };
 
-    pi.on("input", async (event, ctx) => {
-      if (!modelRegistry && ctx.modelRegistry) {
-        modelRegistry = ctx.modelRegistry;
+    /**
+     * Answers the router and, when the handover is accepted, runs the pipeline.
+     * The acknowledgement is emitted before the first step so the router is never
+     * left waiting on a workflow that will not start.
+     */
+    const handleHandoff = (raw: unknown): void => {
+      const parsed = parseHandoff(raw);
+      if (!parsed.ok) {
+        void logger.log({event: "workflow_rejected", reason: parsed.reason});
+        return;
+      }
+      const handoff = parsed.value;
+      const refuse = (reason: string): void => {
+        pi.events.emit(ackChannel(handoff.requestId), buildRefusal(reason));
+        void logger.log({event: "workflow_rejected", reason, workflowName: handoff.workflow});
+      };
+
+      if (!state.enabled || !state.configValid || !config) {
+        refuse("orchestrator_disabled");
+        return;
+      }
+      const workflow = config.workflows[handoff.workflow];
+      if (!workflow) {
+        refuse(`workflow_not_found:${handoff.workflow}`);
+        return;
       }
       if (!runner) {
-        runner =
-          options.runner ??
-          createNativeAgentRunner({
-            catalog,
-            modelRegistry: ctx.modelRegistry,
-            cwd: ctx.cwd,
-          });
+        refuse("runner_unavailable");
+        return;
       }
-
-      if (!state.enabled || !state.configValid || !config || !classifier || !runner) {
-        await logger.log({event: "input_ignored", reason: "orchestrator_disabled_or_invalid_config"});
-        return {action: "continue"};
-      }
-
-      // Extract and normalize any pasted image paths (e.g. TIFF / HEIC / PNG / JPG)
-      const imageResult = await extractAndNormalizeImagesFromText(event.text);
-      const effectiveText = imageResult.cleanedText;
-      const combinedImages =
-        imageResult.images.length > 0 ? [...(event.images ?? []), ...imageResult.images] : event.images;
-
-      const contextPrompt = extractPreviousUserPrompt(ctx.sessionManager);
-      const outcome = await processInput(
-        {text: effectiveText, contextPrompt},
-        {
-          config,
-          classify: classifier,
-          runner,
-          isEnabled: () => state.enabled,
-          catalog,
-        }
-      );
-
-      if (!outcome.ok) {
-        await logger.log({event: "input_fail_open", reason: outcome.reason});
-        if (imageResult.images.length > 0) {
-          return {
-            action: "transform",
-            text: effectiveText,
-            images: combinedImages,
-          };
-        }
-        return {action: "continue"};
-      }
-
-      await logger.log({
-        event: "dispatched",
-        domain: outcome.decision.domain,
-        effort: outcome.decision.effort,
-        handle: outcome.decision.handle,
-        model: outcome.decision.model,
-        thinking: outcome.decision.thinking,
-        mode: outcome.decision.mode,
-        workflowName: outcome.decision.workflowName,
-        latencyMs: outcome.latencyMs,
-      });
-
-      const agentRes = catalog.getAgent(outcome.decision.handle);
-      const agent = agentRes.ok ? agentRes.value : undefined;
-
-      // Render routing details, specialist scope and armed tools
-      pi.appendEntry<OrchestratorTaskCardData>(ORCHESTRATOR_TASK_ENTRY_TYPE, {
-        userPrompt: effectiveText,
-        domain: outcome.decision.domain,
-        effort: outcome.decision.effort,
-        handle: outcome.decision.handle,
-        agentDescription: agent?.description,
-        agentTools: agent?.tools,
-        model: outcome.decision.model,
-        thinking: outcome.decision.thinking,
-        latencyMs: outcome.latencyMs,
-        mode: outcome.decision.mode,
-        workflowName: outcome.decision.workflowName,
-        switchModel: state.switchModel,
-        switchThinking: state.switchThinking,
-        switchAgent: state.switchAgent,
-      });
-
       const currentRunner = runner;
 
-      if (outcome.decision.mode === "fastPath") {
-        if (state.switchAgent && agent) {
-          pendingSpecialistPrompt = agent.systemPrompt;
-          if (agent.tools.length > 0) {
-            pi.setActiveTools(agent.tools);
-          }
-        }
+      pi.events.emit(ackChannel(handoff.requestId), buildAck(handoff.workflow));
+      // An unhandled rejection inside a detached pipeline kills the process, so the
+      // runner is never left without a catch.
+      runPipeline(handoff, workflow, currentRunner).catch(async (err: unknown) => {
+        await logger.log({
+          event: "workflow_crash",
+          workflowName: handoff.workflow,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    };
 
-        if (state.switchModel) {
-          const resolveModel = createGenericModelResolver(modelRegistry ?? ctx.modelRegistry);
-          const targetModel = resolveModel(outcome.decision.model);
-          if (targetModel) {
-            await pi.setModel(targetModel);
-          }
-        }
+    const runPipeline = async (
+      handoff: WorkflowHandoff,
+      workflow: WorkflowConfig,
+      currentRunner: NativeAgentRunner
+    ): Promise<void> => {
+      await logger.log({
+        event: "workflow_started",
+        workflowName: handoff.workflow,
+        domain: handoff.domain,
+        effort: handoff.effort,
+        handle: handoff.handle,
+      });
 
-        if (state.switchThinking && outcome.decision.thinking) {
-          pi.setThinkingLevel(outcome.decision.thinking as import("@earendil-works/pi-agent-core").ThinkingLevel);
-        }
-
-        if (imageResult.images.length > 0) {
-          return {
-            action: "transform",
-            text: effectiveText,
-            images: combinedImages,
-          };
-        }
-
-        return {action: "continue"};
-      }
-
-      if (outcome.decision.mode === "workflow" && outcome.decision.workflowName) {
-        const workflow = config.workflows[outcome.decision.workflowName];
-        if (workflow) {
-          runSequentialPipeline({
-            workflowName: outcome.decision.workflowName,
-            workflow,
-            userPrompt: effectiveText,
-            config,
-            runner: currentRunner,
-            onProgress: progress => {
-              pi.appendEntry<PipelineProgressData>(PIPELINE_PROGRESS_ENTRY_TYPE, progress);
-            },
-          })
-            .then(async res => {
-              await logger.log({
-                event: "workflow_finished",
-                workflowName: outcome.decision.workflowName,
-                status: res.ok ? "completed" : "error",
-                error: res.ok ? undefined : res.reason,
-              });
-            })
-            .catch(async (err: unknown) => {
-              await logger.log({
-                event: "workflow_crash",
-                workflowName: outcome.decision.workflowName,
-                error: String(err),
-              });
+      const result = await runSequentialPipeline({
+        workflowName: handoff.workflow,
+        workflow,
+        userPrompt: handoff.prompt,
+        effortModels: handoff.effortModels,
+        runner: currentRunner,
+        onProgress: progress,
+        onApprovalRequired: async (step, previousResult) => {
+          // No UI means no way to ask: the gate closes, it never opens silently.
+          if (!sessionCtx) return false;
+          try {
+            return await sessionCtx.ui.confirm(
+              `Aprobar ${handoff.workflow}: ${step.name}`,
+              `${previousResult.slice(0, 1500)}\n\n¿Continúa el pipeline?`
+            );
+          } catch (err: unknown) {
+            await logger.log({
+              event: "approval_unavailable",
+              workflowName: handoff.workflow,
+              reason: err instanceof Error ? err.message : String(err),
             });
-        }
+            return false;
+          }
+        },
+      });
 
-        return {action: "handled"};
+      const [lastStep] = [...workflow.steps].reverse();
+      const lastResult = result.ok && result.value.length > 0 ? result.value[result.value.length - 1] : undefined;
+      const preview = lastResult?.payload.result.replace(/\s+/g, " ").slice(0, RESULT_PREVIEW_CHARS);
+
+      if (result.ok) {
+        if (lastStep) {
+          progress({
+            workflowName: handoff.workflow,
+            currentStep: lastStep.step,
+            totalSteps: workflow.steps.length,
+            stepName: lastStep.name,
+            agent: lastStep.agent,
+            model: lastResult?.model ?? "",
+            status: "completed",
+            activity: preview === undefined || preview.length === 0 ? "Pipeline completado." : preview,
+          });
+        }
+        await logger.log({event: "workflow_finished", workflowName: handoff.workflow, status: "completed"});
+        return;
       }
 
-      return {action: "continue"};
-    });
+      if (lastStep) {
+        progress({
+          workflowName: handoff.workflow,
+          currentStep: lastStep.step,
+          totalSteps: workflow.steps.length,
+          stepName: lastStep.name,
+          agent: lastStep.agent,
+          model: "",
+          status: "failed",
+          activity: result.reason,
+        });
+      }
+      await logger.log({
+        event: "workflow_finished",
+        workflowName: handoff.workflow,
+        status: "failed",
+        reason: result.reason,
+      });
+    };
+
+    pi.events.on(WORKFLOW_CHANNEL, handleHandoff);
 
     pi.registerCommand("orchestrator", {
-      description: "Configurar o alternar Pi Smart Orchestrator (/orchestrator [settings|on|off|model|thinking|agent])",
+      description: "Configurar o alternar Pi Smart Orchestrator (/orchestrator [settings|on|off])",
       handler: async (args, ctx) => {
         const trimmed = args.trim();
         if (!trimmed || trimmed === "settings" || trimmed === "config" || trimmed === "menu") {
@@ -361,12 +287,8 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
           ctx.ui.setStatus(STATUS_KEY, activeStatus ? "orchestrator: active" : "orchestrator: off");
           return;
         }
-
         const outcome = resolveOrchestratorCommand(args, state);
         state.enabled = outcome.enabled && state.configValid;
-        state.switchModel = outcome.switchModel;
-        state.switchThinking = outcome.switchThinking;
-        state.switchAgent = outcome.switchAgent;
         if (outcome.changed) {
           ctx.ui.setStatus(STATUS_KEY, outcome.status);
         }
@@ -384,10 +306,7 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     });
 
     // Helper to insert agent tag into main terminal editor
-    const activateAgentInEditor = (
-      agentName: string,
-      ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext
-    ) => {
+    const activateAgentInEditor = (agentName: string, ctx: ExtensionCommandContext) => {
       const currentText = ctx.ui.getEditorText().trim();
       if (currentText.length > 0 && !currentText.includes(`@${agentName}`)) {
         ctx.ui.setEditorText(`@${agentName} ${currentText}`);
@@ -490,10 +409,7 @@ export function createSmartOrchestrator(options: SmartOrchestratorOptions = {}):
     }
 
     // Input Clipboard Utilities
-    const copyInputHandler = async (
-      _args: string,
-      ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext
-    ) => {
+    const copyInputHandler = async (_args: string, ctx: ExtensionCommandContext) => {
       const editorText = ctx.ui.getEditorText();
       if (editorText && editorText.trim().length > 0) {
         await copyToClipboard(editorText);
